@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "distro": "Crust OS",
+  "build_date": "2026.06.16",
+  "update_source": "https://github.com/MysteryTofficial/crust0s",
+  "packages": [
+    {
+      "name": "crustos-base",
+      "version": "1.0.1",
+      "type": "package",
+      "severity": "recommended",
+      "description": "Crust OS base system package"
+    },
+    {
+      "name": "crust-hwdetect",
+      "version": "2.0.0",
+      "type": "package",
+      "severity": "recommended",
+      "description": "Hardware detection and driver injection"
+    },
+    {
+      "name": "crustos-iso",
+      "version": "2026.06.16",
+      "type": "iso",
+      "severity": "optional",
+      "description": "New Crust OS ISO release — consider re-installing for latest features"
+    }
+  ]
+}

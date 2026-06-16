@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+#
+# crust-hwdetect — Calamares post-install HW detection & driver injection
+#
+# Called by a Calamares shellprocess module after the target OS is
+# deployed.  Detects CPU vendor, GPU topology, and installs the
+# appropriate microcode, Mesa drivers, or NVIDIA proprietary stack.
+# On hybrid Intel/NVIDIA or AMD/NVIDIA systems it invokes envycontrol
+# to lock D3cold runtime power management (zero-watt sleep).
+# Also probes USB for common accessories (RTL-SDR, printers, etc.)
+# and installs matching driver stacks.
+#
+set -euo pipefail
+
+LOG=/var/log/crust-hwdetect.log
+ROOT_MOUNT="${1:-/mnt}"
+
+# redirect all output
+exec > >(tee -a "$LOG") 2>&1
+
+echo "[*] Crust HW-Detect starting — target=${ROOT_MOUNT}"
+
+# bail early if target doesn't exist
+if [ ! -d "$ROOT_MOUNT" ]; then
+  echo "[!] Target directory $ROOT_MOUNT not found — aborting" >&2
+  exit 1
+fi
+
+# ------------------------------------------------------------------
+# helpers
+# ------------------------------------------------------------------
+pac_install() {
+  arch-chroot "$ROOT_MOUNT" pacman -S --noconfirm --needed "$@" 2>/dev/null || \
+    echo "[!] pacman install failed for: $*" >&2
+}
+
+# ------------------------------------------------------------------
+# 1. CPU microcode
+# ------------------------------------------------------------------
+detect_ucode() {
+  local vendor
+  vendor=$(grep -m1 'vendor_id' /proc/cpuinfo 2>/dev/null | awk '{print $3}')
+
+  case "$vendor" in
+    GenuineIntel)
+      echo "[*] Intel CPU — installing intel-ucode"
+      pac_install intel-ucode
+      ;;
+    AuthenticAMD)
+      echo "[*] AMD CPU — installing amd-ucode"
+      pac_install amd-ucode
+      ;;
+    *)
+      echo "[!] Unknown CPU vendor '$vendor' — skipping microcode" >&2
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------
+# 2. GPU detection & driver stack
+# ------------------------------------------------------------------
+detect_gpu() {
+  local has_nvidia=false has_intel=false has_amd=false
+
+  while IFS= read -r line; do
+    case "$line" in
+      *"NVIDIA"*)               has_nvidia=true ;;
+      *"Intel"*|*"Intel Corporation"*) has_intel=true  ;;
+      *"AMD"*|*"Advanced Micro"*)      has_amd=true ;;
+    esac
+  done < <(lspci -nn 2>/dev/null | grep -iE '(VGA|3D|Display)' || true)
+
+  echo "[*] GPU topology: nvidia=$has_nvidia intel=$has_intel amd=$has_amd"
+
+  local pkgs=()
+
+  # --- hybrid: NVIDIA + integrated ---
+  if [ "$has_nvidia" = true ] && { [ "$has_intel" = true ] || [ "$has_amd" = true ]; }; then
+    echo "[*] Hybrid GPU detected — NVIDIA + $([ "$has_intel" = true ] && echo Intel || echo AMD)"
+
+    pkgs+=(nvidia-dkms nvidia-utils nvidia-settings)
+    pkgs+=(mesa)
+    [ "$has_intel" = true ] && pkgs+=(vulkan-intel libva-intel-driver intel-media-driver)
+    [ "$has_amd" = true ]   && pkgs+=(vulkan-radeon libva-mesa-driver)
+
+    pac_install "${pkgs[@]}"
+
+    # Lock D3cold runtime PM — zero-watt dGPU sleep, no reboot needed
+    arch-chroot "$ROOT_MOUNT" envycontrol -s hybrid --rtd3 2 2>/dev/null || \
+      echo "[!] envycontrol failed — skipping RTD3" >&2
+
+  # --- standalone NVIDIA ---
+  elif [ "$has_nvidia" = true ]; then
+    echo "[*] Standalone NVIDIA — installing proprietary drivers"
+    pac_install nvidia-dkms nvidia-utils nvidia-settings
+
+  # --- Intel only ---
+  elif [ "$has_intel" = true ]; then
+    echo "[*] Intel GPU — installing Mesa/Iris + VA-API"
+    pac_install mesa vulkan-intel libva-intel-driver intel-media-driver
+
+  # --- AMD only ---
+  elif [ "$has_amd" = true ]; then
+    echo "[*] AMD GPU — installing Mesa/Radeon + VA-API"
+    pac_install mesa vulkan-radeon libva-mesa-driver
+
+  else
+    echo "[!] No known GPU found — installing Mesa (fallback)"
+    pac_install mesa
+  fi
+
+  # Global Wayland environment (applies to all GPU configs)
+  mkdir -p "$ROOT_MOUNT/etc/environment.d"
+  cat > "$ROOT_MOUNT/etc/environment.d/99-crust-wayland.conf" <<'ENVEOF'
+GBM_BACKEND=nvidia-drm
+__GLX_VENDOR_LIBRARY_NAME=nvidia
+WLR_NO_HARDWARE_CURSORS=1
+QT_AUTO_SCREEN_SET_FACTOR=1
+XDG_SESSION_TYPE=wayland
+ELECTRON_OZONE_PLATFORM_HINT=auto
+ENVEOF
+}
+
+# ------------------------------------------------------------------
+# 3. USB accessory detection (RTL-SDR, printers, SDR, etc.)
+# ------------------------------------------------------------------
+detect_usb_accessories() {
+  echo "[*] Probing USB for accessory hardware …"
+
+  [ -f /usr/bin/lsusb ] || return 0
+
+  local usb_devices
+  usb_devices=$(lsusb 2>/dev/null || true)
+  [ -z "$usb_devices" ] && return 0
+
+  local pkgs=()
+
+  # RTL-SDR (Realtek RTL2832U — VID 0x0bda)
+  if echo "$usb_devices" | grep -qi '0bda.*2838\|RTL2838\|RTL2832U'; then
+    echo "[*] RTL-SDR dongle detected"
+    pkgs+=(rtl-sdr rtl-433 dump1090)
+  fi
+
+  # HackRF
+  if echo "$usb_devices" | grep -qi '1d50.*6089\|HackRF'; then
+    echo "[*] HackRF detected"
+    pkgs+=(hackrf)
+  fi
+
+  # Airspy
+  if echo "$usb_devices" | grep -qi '1d50.*60a1\|Airspy'; then
+    echo "[*] Airspy SDR detected"
+    pkgs+=(airspy)
+  fi
+
+  # HP printers (USB)
+  if echo "$usb_devices" | grep -qi '03f0\|HP\|Hewlett-Packard'; then
+    echo "[*] HP printer/scanner detected"
+    pkgs+=(hplip)
+  fi
+
+  # Brother printers (AUR packages — installed if available)
+  if echo "$usb_devices" | grep -qi '04f9\|Brother'; then
+    echo "[*] Brother printer detected — installing drivers"
+    for _pkg in brlaser brscan4; do
+      pac_install "$_pkg" 2>/dev/null || echo "[!] Brother driver $_pkg not in repo" >&2
+    done
+  fi
+
+  # Xbox controllers
+  if echo "$usb_devices" | grep -qi '045e.*028e\|045e.*0719\|Xbox'; then
+    echo "[*] Xbox controller detected"
+    pkgs+=(xpadneo-dkms)
+  fi
+
+  # PlayStation controllers
+  if echo "$usb_devices" | grep -qi '054c.*09cc\|054c.*0ce6\|PS3\|PS4\|PS5\|DualShock\|DualSense'; then
+    echo "[*] PlayStation controller detected"
+    pkgs+=(sony-gsc-dkms)
+  fi
+
+  # Nintendo Switch / Pro controller
+  if echo "$usb_devices" | grep -qi '057e.*2009\|057e.*200e\|Nintendo'; then
+    echo "[*] Nintendo controller detected"
+    pkgs+=(hid-nintendo-dkms)
+  fi
+
+  # YubiKey
+  if echo "$usb_devices" | grep -qi '1050\|Yubico\|YubiKey'; then
+    echo "[*] YubiKey detected"
+    pkgs+=(yubikey-manager-qt pamtester)
+  fi
+
+  if [ ${#pkgs[@]} -gt 0 ]; then
+    echo "[*] Installing accessory drivers: ${pkgs[*]}"
+    pac_install "${pkgs[@]}"
+  fi
+}
+
+# ------------------------------------------------------------------
+# 4. Enable services
+# ------------------------------------------------------------------
+enable_services() {
+  echo "[*] Enabling core services …"
+
+  local services=(
+    NetworkManager.service
+    bluetooth.service
+    iwd.service
+    sddm.service
+    fstrim.timer
+    crust-snap-boot.service
+    crust-update.timer
+    pipewire.socket
+    pipewire-pulse.socket
+    wireplumber.service
+    snapper-timeline.timer
+    snapper-cleanup.timer
+    fwupd.service
+    cups.service
+    power-profiles-daemon.service
+    ufw.service
+  )
+
+  for svc in "${services[@]}"; do
+    arch-chroot "$ROOT_MOUNT" systemctl enable "$svc" 2>/dev/null || \
+      echo "[!] Could not enable $svc — not installed yet" >&2
+  done
+}
+
+# ------------------------------------------------------------------
+# 5. Firewall (UFW) — default deny incoming, allow outgoing
+# ------------------------------------------------------------------
+setup_firewall() {
+  if ! arch-chroot "$ROOT_MOUNT" command -v ufw &>/dev/null; then
+    return
+  fi
+  echo "[*] Configuring UFW firewall …"
+  arch-chroot "$ROOT_MOUNT" ufw default deny incoming 2>/dev/null || true
+  arch-chroot "$ROOT_MOUNT" ufw default allow outgoing 2>/dev/null || true
+  arch-chroot "$ROOT_MOUNT" ufw enable 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------
+# 6. Initial snapper config for BTRFS root
+# ------------------------------------------------------------------
+setup_snapper() {
+  local fstype
+  fstype=$(findmnt -n -o FSTYPE "$ROOT_MOUNT" 2>/dev/null || true)
+  if [ "$fstype" != "btrfs" ]; then
+    echo "[!] Root filesystem is '$fstype', not BTRFS — skipping snapper setup"
+    return
+  fi
+
+  echo "[*] BTRFS root detected — configuring snapper"
+
+  # snapper might not be installed yet
+  arch-chroot "$ROOT_MOUNT" command -v snapper 2>/dev/null || {
+    echo "[!] snapper not installed — skipping" >&2
+    return
+  }
+
+  # Create default snapper config for root (@)
+  arch-chroot "$ROOT_MOUNT" snapper -c root create-config / 2>/dev/null || true
+  arch-chroot "$ROOT_MOUNT" snapper -c root set-config \
+    ALLOW_USERS="" \
+    TIMELINE_CREATE=yes \
+    TIMELINE_CLEANUP=yes \
+    TIMELINE_MIN_AGE=1800 \
+    TIMELINE_LIMIT_DAILY=7 \
+    TIMELINE_LIMIT_WEEKLY=4 \
+    TIMELINE_LIMIT_MONTHLY=0 2>/dev/null || true
+
+  # Create config for /home (@home) if separate subvol
+  if [ -d "$ROOT_MOUNT/home" ]; then
+    arch-chroot "$ROOT_MOUNT" snapper -c home create-config /home 2>/dev/null || true
+  fi
+}
+
+# ------------------------------------------------------------------
+# 7. Default apps (Brave browser + VLC media)
+# ------------------------------------------------------------------
+set_default_apps() {
+  echo "[*] Setting Brave as default browser …"
+  arch-chroot "$ROOT_MOUNT" xdg-settings set default-web-browser brave-browser.desktop 2>/dev/null || true
+
+  echo "[*] Setting VLC as default media player …"
+  arch-chroot "$ROOT_MOUNT" xdg-mime default vlc.desktop video/mp4 2>/dev/null || true
+  arch-chroot "$ROOT_MOUNT" xdg-mime default vlc.desktop video/x-matroska 2>/dev/null || true
+  arch-chroot "$ROOT_MOUNT" xdg-mime default vlc.desktop audio/mpeg 2>/dev/null || true
+  arch-chroot "$ROOT_MOUNT" xdg-mime default vlc.desktop audio/flac 2>/dev/null || true
+
+  mkdir -p "$ROOT_MOUNT/usr/share/applications"
+  cat > "$ROOT_MOUNT/usr/share/applications/mimeinfo.cache" <<'EOF'
+[MIME Cache]
+x-scheme-handler/http=brave-browser.desktop
+x-scheme-handler/https=brave-browser.desktop
+text/html=brave-browser.desktop
+video/mp4=vlc.desktop
+video/x-matroska=vlc.desktop
+video/webm=vlc.desktop
+video/avi=vlc.desktop
+audio/mpeg=vlc.desktop
+audio/flac=vlc.desktop
+audio/x-wav=vlc.desktop
+EOF
+}
+
+# ------------------------------------------------------------------
+# 8. Ensure mkinitcpio presets exist for both kernels
+# ------------------------------------------------------------------
+setup_mkinitcpio() {
+  echo "[*] Regenerating initramfs for installed kernels …"
+  arch-chroot "$ROOT_MOUNT" mkinitcpio -P 2>/dev/null || \
+    echo "[!] mkinitcpio -P failed — initramfs may be missing" >&2
+}
+
+# ------------------------------------------------------------------
+# main
+# ------------------------------------------------------------------
+detect_ucode
+detect_gpu
+detect_usb_accessories
+enable_services
+setup_firewall
+setup_snapper
+set_default_apps
+setup_mkinitcpio
+
+echo "[*] Crust HW-Detect complete"

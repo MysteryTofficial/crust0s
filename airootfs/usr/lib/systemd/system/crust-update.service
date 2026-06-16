@@ -1,0 +1,12 @@
+# Crust OS — background update check
+[Unit]
+Description=Crust OS update checker
+Documentation=man:crust-update-check(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crust-update-check --notify
+StandardOutput=journal
+StandardError=journal

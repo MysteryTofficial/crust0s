@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+#
+# crust-update-gui — YAD-based update dialog for Crust OS
+#
+set -euo pipefail
+
+CHECK_SCRIPT=/usr/local/bin/crust-update-check
+LOG=/var/log/crust-update-gui.log
+
+exec > >(tee -a "$LOG") 2>&1
+
+# -- require root for install operations
+if [ "$(id -u)" -ne 0 ] && command -v pkexec &>/dev/null; then
+  exec pkexec "$0" "$@"
+fi
+
+command -v yad &>/dev/null || {
+  echo "[!] yad not installed"
+  exit 1
+}
+
+# ------------------------------------------------------------------
+fetch_updates() {
+  local json
+  json=$("$CHECK_SCRIPT" --json 2>/dev/null) || {
+    yad --title="Crust OS Update" --window-icon=software-update \
+      --button="Close":0 --text="Could not fetch update information.\nCheck your internet connection." \
+      --type=error
+    exit 1
+  }
+
+  local count
+  count=$(echo "$json" | jq '.updates | length // 0' 2>/dev/null || echo 0)
+  echo "$json" > /tmp/crust-update-results.json
+  echo "$count"
+}
+
+# ------------------------------------------------------------------
+show_dialog() {
+  local count=$1
+  local results=/tmp/crust-update-results.json
+
+  if [ "$count" -eq 0 ]; then
+    yad --title="Crust OS Update" --window-icon=software-update \
+      --image=dialog-information \
+      --text="<b>Your system is up to date.</b>\n\nNo updates available at this time." \
+      --button="Close":0 \
+      --width=400 --center
+    return
+  fi
+
+  local rows=()
+  while IFS= read -r row; do
+    local name old new type sev desc
+    name=$(echo "$row" | jq -r '.name // ""')
+    old=$(echo "$row" | jq -r '.old // "-"')
+    new=$(echo "$row" | jq -r '.new // ""')
+    type=$(echo "$row" | jq -r '.type // "package"')
+    sev=$(echo "$row" | jq -r '.severity // "info"')
+    rows+=("$name" "$old" "$new" "$type" "$sev")
+  done < <(echo "$results" | jq -c '.updates[]? // []')
+
+  local desc_text="<b>${count} update$([ "$count" -ne 1 ] && echo s) available</b>"
+
+  yad --title="Crust OS Update" --window-icon=software-update \
+    --list \
+    --columns="NAME!INSTALLED!AVAILABLE!TYPE!SEVERITY" \
+    --column="Name" \
+    --column="Installed" \
+    --column="Available" \
+    --column="Type" \
+    --column="Severity" \
+    "${rows[@]}" \
+    --text="$desc_text" \
+    --button="Install All!gtk-yes":0 \
+    --button="Cancel":1 \
+    --width=700 --height=400 \
+    --center \
+    --no-selection 2>/dev/null
+
+  local exit_code=$?
+  [ "$exit_code" -eq 0 ] && install_updates
+}
+
+# ------------------------------------------------------------------
+install_updates() {
+  yad --title="Crust OS Update" --window-icon=software-update \
+    --progress --pulsate --auto-close \
+    --text="Installing updates…" \
+    --width=400 --center &
+
+  local yad_pid=$!
+
+  # Run pacman update with conflict resolution flags
+  if pacman -Syu --noconfirm --overwrite='*' 2>&1 | tee -a "$LOG"; then
+    kill "$yad_pid" 2>/dev/null || true
+    yad --title="Crust OS Update" --window-icon=software-update \
+      --image=dialog-information \
+      --text="<b>Updates installed successfully.</b>\n\nSome updates may require a reboot." \
+      --button="Reboot Now":0 \
+      --button="Later":1 \
+      --width=400 --center
+
+    [ $? -eq 0 ] && systemctl reboot
+  else
+    kill "$yad_pid" 2>/dev/null || true
+    yad --title="Crust OS Update" --window-icon=software-update \
+      --image=dialog-error \
+      --text="<b>Update failed.</b>\n\nCheck /var/log/crust-update-gui.log for details." \
+      --button="Close":0 \
+      --width=400 --center
+  fi
+}
+
+# ------------------------------------------------------------------
+count=$(fetch_updates)
+show_dialog "$count"

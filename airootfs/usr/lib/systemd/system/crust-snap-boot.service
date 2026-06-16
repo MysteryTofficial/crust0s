@@ -1,0 +1,13 @@
+# Crust OS — Regenerate systemd-boot snapshot entries
+[Unit]
+Description=Generate systemd-boot entries for BTRFS snapshots
+ConditionPathExists=/.snapshots
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crust-snap-boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

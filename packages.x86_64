@@ -1,0 +1,117 @@
+# Crust OS — minimal package selection
+# --- desktop environment ---
+cosmic-session
+cosmic-store
+flatpak
+archlinux-appstream-data
+
+# --- display manager ---
+sddm
+
+# --- audio (PipeWire + ALSA + hi-res) ---
+pipewire
+wireplumber
+pipewire-pulse
+pipewire-alsa
+pipewire-jack
+alsa-utils
+alsa-tools
+alsa-firmware
+alsa-plugins
+realtime-privileges
+
+# --- bluetooth ---
+bluez
+bluez-utils
+
+# --- networking ---
+iwd
+networkmanager
+
+# --- graphics (base only; hwdetect adds vendor-specific) ---
+mesa
+# envycontrol — installed post-deploy by crust-hwdetect
+intel-ucode
+amd-ucode
+
+# --- kernels (LTS default, Zen for flexibility) ---
+linux-lts
+linux-lts-headers
+linux-zen
+linux-zen-headers
+linux-firmware
+
+# --- display / boot ---
+plymouth
+
+# --- filesystem / snapshots ---
+snapper
+btrfs-progs
+
+# --- installer ---
+calamares
+
+# --- wine / binary compat ---
+wine
+winetricks
+wine-mono
+wine-gecko
+
+# --- web browser ---
+chromium
+
+# --- media ---
+vlc
+ffmpeg
+gst-plugins-good
+
+# --- AppImage support ---
+fuse2
+fuse3
+
+# --- accessory drivers ---
+cups
+cups-filters
+ghostscript
+fwupd
+power-profiles-daemon
+colord
+sane
+sane-airscan
+v4l-utils
+
+# --- extra filesystems ---
+ntfs-3g
+exfatprogs
+
+# --- hardware detection (needed by crust-hwdetect) ---
+pciutils
+usbutils
+dmidecode
+unzip
+
+# --- disk management ---
+gparted
+dosfstools
+
+# --- firewall ---
+ufw
+
+# --- fonts ---
+noto-fonts
+
+# --- document viewer ---
+evince
+
+# --- archive manager ---
+file-roller
+
+# --- essential ---
+sudo
+polkit
+yad
+jq
+archlinux-keyring
+man-db
+man-pages
+xdg-utils

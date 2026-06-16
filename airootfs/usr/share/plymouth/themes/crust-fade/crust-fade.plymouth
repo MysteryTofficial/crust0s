@@ -1,0 +1,4 @@
+[Plymouth Theme]
+Name=Crust Fade
+Description=Colour fills the logo from bottom to top like rising water as the OS boots
+ModuleName=script

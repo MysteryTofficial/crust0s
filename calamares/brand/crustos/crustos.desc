@@ -1,0 +1,26 @@
+# Crust OS — Calamares branding descriptor
+---
+componentName: crustos
+name: Crust OS
+displayName: Crust OS
+version: 1.0
+shortDescription: Crust OS Installer
+description: |-
+  Welcome to the Crust OS installer.
+
+  A modern Arch-based distribution featuring the COSMIC desktop,
+  zero-reboot hybrid GPU power management, and BTRFS snapshot recovery.
+
+strings:
+  productName: Crust OS
+  versionedName: Crust OS
+  shortProductName: Crust OS
+  versionedShort: Crust OS
+  bootloaderEntryName: Crust OS
+
+slideshow: ""
+
+style:
+  sidebarBackground: "#1a1a2e"
+  sidebarText: "#ffffff"
+  sidebarSelect: "#e94560"
