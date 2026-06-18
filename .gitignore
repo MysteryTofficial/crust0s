@@ -1,7 +1,0 @@
-crust-os-*.iso
-localrepo/
-airootfs/root/
-work/
-/tmp/
-*.img
-*.pkg.tar.zst
